@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from "react";
-import { TrendingUp, Wallet, LineChart, ChevronDown, ChevronUp, Info, Plus, Trash2, LayoutGrid, HelpCircle, AlertTriangle, RefreshCw } from "lucide-react";
+import { TrendingUp, Wallet, LineChart, ChevronDown, ChevronUp, Info, Plus, Trash2, LayoutGrid, HelpCircle, AlertTriangle, RefreshCw, Hammer } from "lucide-react";
 
 // ---------- odds math ----------
 const americanToDecimal = (a) => (a > 0 ? 1 + a / 100 : 1 + 100 / Math.abs(a));
@@ -58,7 +58,28 @@ function normalizeLive(apiGames) {
     .filter((g) => g.books.length >= 2);
 }
 
-// ---------- shared fair-line model (sharp-weighted, de-vigged consensus) ----------
+// ---------- HAMMER plays: composite of what's actually real right now ----------
+// Combines EV% (sharp-book model) with whether the independent Dixon-Coles-style
+// model agrees on direction. Trends is NOT folded in yet — the Trends tab is still
+// placeholder sample cards, not per-game data, so including it here would be
+// presenting a fake signal as if it were real. Add it once a real historical
+// results feed backs the Trends tab.
+function hammerize(opportunities, games) {
+  return opportunities.map((o) => {
+    const game = games.find((g) => g.id === o.gameId);
+    const model = modelProbabilities(game.home, game.away, game.sport);
+    let tier = "ev-only";
+    let modelNote = "No independent model available for this sport yet.";
+    if (model.applicable) {
+      const modelFavorsSide = o.side === game.home ? model.home > model.away : model.away > model.home;
+      if (modelFavorsSide) { tier = "confirmed"; modelNote = "Independent model also favors this side."; }
+      else { tier = "conflicted"; modelNote = "Independent model favors the other side — lower confidence."; }
+    }
+    return { ...o, tier, modelNote };
+  });
+}
+
+
 function withModel(games) {
   return games.map((g) => {
     const rows = g.books.map((r) => {
@@ -388,6 +409,54 @@ function ModelPanel({ game }) {
 }
 
 
+// ---------- HAMMER: composite top plays ----------
+function HammerBoard({ games }) {
+  const [minEv, setMinEv] = useState(1.5);
+  const opps = useMemo(() => buildOpportunities(games), [games]);
+  const hammered = useMemo(() => hammerize(opps, games), [opps, games]);
+  const plays = hammered
+    .filter((o) => o.ev >= minEv / 100 && o.tier !== "conflicted")
+    .sort((a, b) => b.ev - a.ev)
+    .slice(0, 10);
+
+  return (
+    <div>
+      <Explainer title="What makes a Hammer play?">
+        A Hammer play has to clear two checks, not one: it needs real EV against the sharp-book model, and the independent scoring model can't be actively arguing for the other side. That second check isn't available for every sport yet (basketball, MMA, anything without a solid scoring-based model) — for those, a play only needs to clear the EV bar. Trends aren't factored in here yet — the Trends tab is still placeholder data, not tied to specific games, so it would be dishonest to fold it into this score until there's a real historical results feed behind it.
+      </Explainer>
+      <div className="filters">
+        <div className="evFilter">
+          <span>Min EV</span>
+          <input type="range" min="0" max="8" step="0.5" value={minEv} onChange={(e) => setMinEv(+e.target.value)} />
+          <span className="evFilterVal">{minEv}%</span>
+        </div>
+      </div>
+      <div className="boardList">
+        {plays.length === 0 && <div className="empty">No plays clear both the EV bar and the model check right now.</div>}
+        {plays.map((o, idx) => (
+          <div className="card hammerCard" key={idx}>
+            <div className="hammerHead">
+              <Hammer size={14} className="hammerIcon" />
+              <span className="cardTop"><span className="sportTag">{o.sport}</span><span className="timeTag">{o.time}</span></span>
+            </div>
+            <div className="matchup" style={{ padding: "0 14px" }}>{o.matchup}</div>
+            <div className="sideRow" style={{ padding: "0 14px 8px" }}>
+              <span className="sideName">{o.side}</span>
+              <span className="bookName">{displayBook(o.book)}</span>
+              <span className="priceTag">{decimalToAmerican(o.decimal)}</span>
+              <span className="evTag">+{pct(o.ev)} EV</span>
+            </div>
+            <div className={`hammerTierNote ${o.tier}`} style={{ margin: "0 14px 12px" }}>
+              {o.tier === "confirmed" && "✓ Independent model agrees"}
+              {o.tier === "ev-only" && "No independent model for this sport — EV only"}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function cellClass(ev) {
   if (ev > 0.01) return "cellGood";
   if (ev < -0.02) return "cellBad";
@@ -575,6 +644,7 @@ export default function App() {
 
       <main>
         {tab === "ev" && <EvBoard games={games} />}
+        {tab === "hammer" && <HammerBoard games={games} />}
         {tab === "lineshop" && <LineShopBoard games={games} />}
         {tab === "trends" && <Trends />}
         {tab === "bankroll" && <Bankroll />}
@@ -582,6 +652,7 @@ export default function App() {
 
       <nav className="tabbar">
         <button className={tab === "ev" ? "active" : ""} onClick={() => setTab("ev")}><TrendingUp size={18} /> +EV</button>
+        <button className={tab === "hammer" ? "active" : ""} onClick={() => setTab("hammer")}><Hammer size={18} /> Hammer</button>
         <button className={tab === "lineshop" ? "active" : ""} onClick={() => setTab("lineshop")}><LayoutGrid size={18} /> The Board</button>
         <button className={tab === "trends" ? "active" : ""} onClick={() => setTab("trends")}><LineChart size={18} /> Trends</button>
         <button className={tab === "bankroll" ? "active" : ""} onClick={() => setTab("bankroll")}><Wallet size={18} /> Bankroll</button>
@@ -690,6 +761,12 @@ const APP_CSS = `
   .modelCompareVal.muted { color: #8590A6; }
   .modelFlag { display: flex; gap: 6px; align-items: flex-start; font-size: 11px; color: #E8B84B; line-height: 1.5; padding-top: 8px; border-top: 1px dashed #1E2530; }
   .modelAgree { font-size: 11px; color: #56606F; padding-top: 8px; border-top: 1px dashed #1E2530; }
+  .hammerCard { border-color: rgba(232,184,75,0.25); }
+  .hammerHead { display: flex; align-items: center; gap: 8px; padding: 12px 14px 4px; }
+  .hammerIcon { color: #E8B84B; }
+  .hammerTierNote { font-size: 11px; padding-top: 8px; border-top: 1px dashed #1E2530; }
+  .hammerTierNote.confirmed { color: #34D399; }
+  .hammerTierNote.ev-only { color: #56606F; }
   .trendsGrid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .trendCard { background: #141A24; border: 1px solid #1E2530; border-radius: 12px; padding: 14px; }
   .trendLabel { font-size: 11.5px; color: #8590A6; margin-bottom: 8px; line-height: 1.3; }
